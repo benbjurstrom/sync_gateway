@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
-
 	"github.com/couchbase/gocb"
 	sgbucket "github.com/couchbase/sg-bucket"
 	"gopkg.in/couchbase/gocbcore.v6"
@@ -551,10 +550,6 @@ func (bucket CouchbaseBucketGoCB) processGetCountersBatch(keys []string, resultA
 	}
 
 	return nil
-}
-
-func (bucket CouchbaseBucketGoCB) Close() {
-	bucket.Bucket.Close()
 }
 
 func createBatchesEntries(batchSize uint, entries []*sgbucket.BulkSetEntry) [][]*sgbucket.BulkSetEntry {
@@ -1246,26 +1241,76 @@ func (bucket CouchbaseBucketGoCB) Incr(k string, amt, def uint64, exp int) (uint
 }
 
 func (bucket CouchbaseBucketGoCB) GetDDoc(docname string, into interface{}) error {
-	LogPanic("Unimplemented method: GetDDoc()")
+
+	/**
+
+	Walrus:
+
+	2017-04-10 17:00:35.584588 I | design doc: {Language: Views:map[] Options:<nil>}
+
+	Go-couchbase:
+
+	2017-04-10 17:01:45.299076 I | design doc: {Language: Views:map[] Options:<nil>}
+
+
+
+
+	 */
+
+	bucketManager, err := bucket.getBucketManager()
+	if err != nil {
+		return err
+	}
+
+	designDoc, err := bucketManager.GetDesignDocument(docname)
+
+	// TODO: this is of course sub-optimal to do an unnecessary marshal/unmarshal round trip.
+	// TODO: Looks like it might require changes to gocb or Sync Gateway code in order to avoid this round trip
+
+	// Serialize DesignDocument into []byte
+	designDocBytes, err := json.Marshal(designDoc)
+	if err != nil {
+		return err
+	}
+
+	// Deserialize []byte into "into" empty interface
+	if err := json.Unmarshal(designDocBytes, into); err != nil {
+		return err
+	}
+
 	return nil
+
 }
 
-func (bucket CouchbaseBucketGoCB) PutDDoc(docname string, value interface{}) error {
-
-	// NOTE: this doesn't seem to be identical in behavior with go-couchbase PutDDoc, since this returns an
-	// error if the design doc already exists, whereas go-couchbase PutDDoc handles it more gracefully.
-	// For this reason, the GoCBGoCouchbaseHybridBucket calls down into go-couchbase for it's DDoc operations.
+func (bucket CouchbaseBucketGoCB) getBucketManager() (*gocb.BucketManager, error) {
 
 	// Get bucket manager.  Relies on existing auth settings for bucket.
 	username, password := bucket.GetBucketCredentials()
 	manager := bucket.Bucket.Manager(username, password)
 	if manager == nil {
-		return fmt.Errorf("Unable to obtain manager for bucket %s - cannot PUT design doc %s", bucket.GetName(), docname)
+		return nil, fmt.Errorf("Unable to obtain manager for bucket %s", bucket.GetName())
 	}
 
-	sgDesignDoc, ok := value.(sgbucket.DesignDoc)
-	if !ok {
-		return fmt.Errorf("Unable to identify specified design document")
+	return manager, nil
+
+}
+
+func (bucket CouchbaseBucketGoCB) PutDDoc(docname string, value interface{}) error {
+
+	manager, err := bucket.getBucketManager()
+	if err != nil {
+		return err
+	}
+
+	// Convert whatever we got in the value empty interface into a sgbucket.DesignDoc
+	var sgDesignDoc sgbucket.DesignDoc
+	switch typeValue := value.(type) {
+	case sgbucket.DesignDoc:
+		sgDesignDoc = typeValue
+	case *sgbucket.DesignDoc:
+		sgDesignDoc = *typeValue
+	default:
+		return fmt.Errorf("CouchbaseBucketGoCB called with unexpected type.  Expected sgbucket.DesignDoc or *sgbucket.DesignDoc, got %T", value)
 	}
 
 	gocbDesignDoc := &gocb.DesignDocument{
@@ -1280,7 +1325,7 @@ func (bucket CouchbaseBucketGoCB) PutDDoc(docname string, value interface{}) err
 		gocbDesignDoc.Views[viewName] = gocbView
 	}
 
-	return manager.InsertDesignDocument(gocbDesignDoc)
+	return manager.UpsertDesignDocument(gocbDesignDoc)
 
 }
 
@@ -1289,17 +1334,101 @@ func (bucket CouchbaseBucketGoCB) IsKeyNotFoundError(err error) bool {
 }
 
 func (bucket CouchbaseBucketGoCB) DeleteDDoc(docname string) error {
-	LogPanic("Unimplemented method: DeleteDDoc()")
-	return nil
+
+	manager, err := bucket.getBucketManager()
+	if err != nil {
+		return err
+	}
+
+	return manager.RemoveDesignDocument(docname)
+
 }
 
 func (bucket CouchbaseBucketGoCB) View(ddoc, name string, params map[string]interface{}) (sgbucket.ViewResult, error) {
-	LogPanic("Unimplemented method: View()")
-	return sgbucket.ViewResult{}, nil
+
+	viewResult := sgbucket.ViewResult{}
+	viewResult.Rows = sgbucket.ViewRows{}
+
+	viewQuery := gocb.NewViewQuery(ddoc, name)
+
+	// convert params map to these params
+	applyViewQueryOptions(viewQuery, params)
+
+	goCbViewResult, err := bucket.ExecuteViewQuery(viewQuery)
+	if err != nil {
+		return viewResult, err
+	}
+
+	if goCbViewResult != nil {
+		var vrow sgbucket.ViewRow
+
+		// Iterate over view results
+		for goCbViewResult.Next(&vrow) {
+			viewResult.Rows = append(viewResult.Rows, &vrow)
+
+			// TODO: according to the docs for totalRows() on https://developer.couchbase.com/documentation/server/4.0/sdks/java-2.2/querying-views.html
+			// "The total number of rows in the index can be greater than the number of rows() returned."
+			// So I believe this is incorrect.  See https://forums.couchbase.com/t/should-totalrows-be-exposed-in-viewresults/12398
+			viewResult.TotalRows += 1
+		}
+
+		// Any error processing view results is returned on Close
+		err := goCbViewResult.Close()
+		if err != nil {
+			return viewResult, err
+		}
+	}
+
+	return viewResult, nil
+
 }
 
 func (bucket CouchbaseBucketGoCB) ViewCustom(ddoc, name string, params map[string]interface{}, vres interface{}) error {
-	LogPanic("Unimplemented method: ViewCustom()")
+
+	viewQuery := gocb.NewViewQuery(ddoc, name)
+
+	// convert params map to these params
+	applyViewQueryOptions(viewQuery, params)
+
+	goCbViewResult, err := bucket.ExecuteViewQuery(viewQuery)
+	if err != nil {
+		return err
+	}
+
+	// Define a struct to store the rows as raw bytes
+	viewResponse := struct {
+		TotalRows int               `json:"total_rows,omitempty"`
+		Rows      []json.RawMessage `json:"rows,omitempty"`
+	}{
+		TotalRows: 0,
+		Rows:      []json.RawMessage{},
+	}
+
+	// Loop over
+	for {
+		bytes := goCbViewResult.NextBytes()
+		if bytes == nil {
+			break
+		}
+		viewResponse.Rows = append(viewResponse.Rows, json.RawMessage(bytes))
+
+		// TODO: according to the docs for totalRows() on https://developer.couchbase.com/documentation/server/4.0/sdks/java-2.2/querying-views.html
+		// "The total number of rows in the index can be greater than the number of rows() returned."
+		// So I believe this is incorrect.  See https://forums.couchbase.com/t/should-totalrows-be-exposed-in-viewresults/12398
+		viewResponse.TotalRows += 1
+	}
+
+	// serialize the whole thing to a []byte
+	viewResponseBytes, err := json.Marshal(viewResponse)
+	if err != nil {
+		return err
+	}
+
+	// unmarshal into vres
+	if err := json.Unmarshal(viewResponseBytes, vres); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -1309,6 +1438,8 @@ func (bucket CouchbaseBucketGoCB) Refresh() error {
 }
 
 func (bucket CouchbaseBucketGoCB) StartTapFeed(args sgbucket.TapArguments) (sgbucket.TapFeed, error) {
+	// See comments in CouchbaseBucketGoCBGoCouchbaseHybrid.StartTapFeed() for an explanation on why
+	// this is not implemented
 	LogPanic("Unimplemented method: StartTapFeed()")
 	return nil, nil
 }
@@ -1340,4 +1471,99 @@ func (bucket CouchbaseBucketGoCB) CouchbaseServerVersion() (major uint64, minor 
 func (bucket CouchbaseBucketGoCB) UUID() (string, error) {
 	// See https://github.com/couchbase/sync_gateway/issues/2418#issuecomment-289941131
 	return "error", fmt.Errorf("GoCB bucket does not expose UUID")
+}
+
+
+func (bucket CouchbaseBucketGoCB) Close() {
+	if err := bucket.Bucket.Close(); err != nil {
+		Warn("Error closing GoCB bucket: %v", err)
+	}
+
+}
+
+// Applies the viewquery options as specified in the params map to the viewQuery object,
+// for example stale=false, etc.
+func applyViewQueryOptions(viewQuery *gocb.ViewQuery, params map[string]interface{}) {
+
+	for optionName, optionValue := range params {
+		switch optionName {
+		case ViewQueryParamStale:
+			if optionValue.(bool) == false {
+				viewQuery.Stale(gocb.Before)
+			}
+		case ViewQueryParamReduce:
+			viewQuery.Reduce(optionValue.(bool))
+		case ViewQueryParamLimit:
+			uintVal, err := normalizeIntToUint(optionValue)
+			if err != nil {
+				Warn(fmt.Sprintf("%v", err))
+			}
+			viewQuery.Limit(uintVal)
+		case ViewQueryParamDescending:
+			if optionValue.(bool) == true {
+				viewQuery.Order(gocb.Descending)
+			}
+		case ViewQueryParamSkip:
+			uintVal, err := normalizeIntToUint(optionValue)
+			if err != nil {
+				Warn(fmt.Sprintf("%v", err))
+			}
+			viewQuery.Skip(uintVal)
+		case ViewQueryParamGroup:
+			viewQuery.Group(optionValue.(bool))
+		case ViewQueryParamGroupLevel:
+			uintVal, err := normalizeIntToUint(optionValue)
+			if err != nil {
+				Warn(fmt.Sprintf("%v", err))
+			}
+			viewQuery.GroupLevel(uintVal)
+		case ViewQueryParamKey:
+			viewQuery.Key(optionValue)
+		case ViewQueryParamKeys:
+			stringKeys := optionValue.([]string)
+			emptyInterfaceKeys := []interface{}{}
+			for _, key := range stringKeys {
+				emptyInterfaceKeys = append(emptyInterfaceKeys, key)
+			}
+			viewQuery.Keys(emptyInterfaceKeys)
+		}
+
+	}
+
+	// Range: startkey, endkey, inclusiveend
+	var startKey, endKey interface{}
+	if _, ok := params[ViewQueryParamStartKey]; ok {
+		startKey = params[ViewQueryParamStartKey]
+	}
+	if _, ok := params[ViewQueryParamEndKey]; ok {
+		endKey = params[ViewQueryParamEndKey]
+	}
+	inclusiveEnd := false
+	if _, ok := params[ViewQueryParamInclusiveEnd]; ok {
+		inclusiveEnd = params[ViewQueryParamInclusiveEnd].(bool)
+	}
+	viewQuery.Range(startKey, endKey, inclusiveEnd)
+
+	// IdRange: startKeyDocId, endKeyDocId
+	startKeyDocId := ""
+	endKeyDocId := ""
+	if _, ok := params[ViewQueryParamStartKeyDocId]; ok {
+		startKeyDocId = params[ViewQueryParamStartKeyDocId].(string)
+	}
+	if _, ok := params[ViewQueryParamEndKeyDocId]; ok {
+		endKeyDocId = params[ViewQueryParamEndKeyDocId].(string)
+	}
+	viewQuery.IdRange(startKeyDocId, endKeyDocId)
+
+}
+
+func normalizeIntToUint(value interface{}) (uint, error) {
+	switch typeValue := value.(type) {
+	case uint:
+		return typeValue, nil
+	case int:
+		return uint(typeValue), nil
+	default:
+		return uint(0), fmt.Errorf("Unable to convert %v (%T) -> uint.", value, value)
+	}
 }

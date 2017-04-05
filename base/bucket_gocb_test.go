@@ -15,10 +15,11 @@ import (
 	"fmt"
 	"log"
 	"testing"
-
+	"github.com/couchbase/gocb"
 	sgbucket "github.com/couchbase/sg-bucket"
 	"github.com/couchbaselabs/go.assert"
 	"gopkg.in/couchbase/gocbcore.v6"
+	"reflect"
 )
 
 // NOTE: most of these tests are disabled by default and have been renamed to Couchbase*
@@ -1032,5 +1033,124 @@ func CouchbaseTestDeleteDocumentAndXATTR(t *testing.T) {
 	var retrievedXattr map[string]interface{}
 	_, err = bucket.GetWithXattr(key, xattrName, &retrievedVal, &retrievedXattr)
 	assert.Equals(t, err, gocbcore.ErrKeyNotFound)
+
+}
+
+func TestApplyViewQueryOptions(t *testing.T) {
+
+	// ------------------- Inline Helper functions ---------------------------
+
+	// Given a string "foo", return ""foo"" with an extra set of double quotes added
+	// This is to be in line with gocb's behavior of wrapping these startkey, endkey in an extra set of double quotes
+	wrapInDoubleQuotes := func(original string) string {
+		return fmt.Sprintf("\"%v\"", original)
+	}
+
+	// The gocb viewquery options map is a url.Values map where each key points to a slice of values.
+	// This helper function makes it easier to get the first value out of that array for a given key
+	getStringFromReflectUrlValuesMap := func(key reflect.Value, reflectMap reflect.Value) string {
+		mapVal := reflectMap.MapIndex(key)
+		return mapVal.Index(0).String()
+
+	}
+
+	// Helper function to extract a particular reflection map key from a list of reflection map keys
+	findStringKeyValue := func(values []reflect.Value, valueToFind string) (foundValue reflect.Value, found bool) {
+		for _, value := range values {
+			if value.Kind() == reflect.String {
+				if value.String() == valueToFind {
+					return value, true
+				}
+			}
+		}
+		return reflect.Value{}, false
+	}
+
+	findStringValue := func(mapKeys []reflect.Value, reflectMap reflect.Value, key string) string {
+		mapKey, found := findStringKeyValue(mapKeys, key)
+		assert.True(t, found)
+		return getStringFromReflectUrlValuesMap(mapKey, reflectMap)
+	}
+
+	// ------------------- Test Code ---------------------------
+
+	// View query params map (go-couchbase/walrus style)
+	params := map[string]interface{}{
+		ViewQueryParamStale:         false,
+		ViewQueryParamReduce:        true,
+		ViewQueryParamStartKey:      "foo",
+		ViewQueryParamEndKey:        "bar",
+		ViewQueryParamInclusiveEnd:  true,
+		ViewQueryParamLimit:         1,
+		ViewQueryParamIncludeDocs:   true, // Ignored -- see https://forums.couchbase.com/t/do-the-viewquery-options-omit-include-docs-on-purpose/12399
+		ViewQueryParamDescending:    true,
+		ViewQueryParamGroup:         true,
+		ViewQueryParamSkip:          2,
+		ViewQueryParamGroupLevel:    3,
+		ViewQueryParamStartKeyDocId: "baz",
+		ViewQueryParamEndKeyDocId:   "blah",
+		ViewQueryParamKey:           "hello",
+		ViewQueryParamKeys:          []string{"a", "b"},
+	}
+
+	// add ViewQueryParamKeys param, which is a json array
+	params[ViewQueryParamKeys] = []string{"a", "b"}
+
+	// Create a new viewquery
+	viewQuery := gocb.NewViewQuery("ddoc", "viewname")
+
+	// Call applyViewQueryOptions (method being tested) which modifies viewQuery according to params
+	applyViewQueryOptions(viewQuery, params)
+
+	// Use reflection to get a handle on the viewquery options (unexported)
+	viewQueryReflectedVal := reflect.ValueOf(*viewQuery)
+	optionsReflectedVal := viewQueryReflectedVal.FieldByName("options")
+
+	// Get all the view query option keys
+	mapKeys := optionsReflectedVal.MapKeys()
+
+	// "stale"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamStale), "false")
+
+	// "reduce"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamReduce), "true")
+
+	// "startkey"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamStartKey), wrapInDoubleQuotes("foo"))
+
+	// "endkey"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamEndKey), wrapInDoubleQuotes("bar"))
+
+	// "inclusive_end"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamInclusiveEnd), "true")
+
+	// "limit"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamLimit), "1")
+
+	// "descending"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamDescending), "true")
+
+	// "group"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamGroup), "true")
+
+	// "skip"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamSkip), "2")
+
+	// "group_level"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamGroupLevel), "3")
+
+	// "startkey_docid"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamStartKeyDocId), "baz")
+
+	// "endkey_docid"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamEndKeyDocId), "blah")
+
+	// "key"
+	assert.Equals(t, findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamKey), wrapInDoubleQuotes("hello"))
+
+	// "keys"
+	assert.Equals(t,
+		findStringValue(mapKeys, optionsReflectedVal, ViewQueryParamKeys),
+		fmt.Sprintf("[%v,%v]", wrapInDoubleQuotes("a"), wrapInDoubleQuotes("b")))
 
 }
