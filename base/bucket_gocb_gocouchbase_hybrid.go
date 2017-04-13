@@ -41,19 +41,10 @@ func NewCouchbaseBucketGoCBGoCouchbaseHybrid(spec BucketSpec, callback sgbucket.
 
 }
 
-
-func (bucket CouchbaseBucketGoCBGoCouchbaseHybrid) Refresh() error {
-	return bucket.GoCouchbaseBucket.Refresh()
-}
-
 // It would be a considerable amount of work to add mutation feed support using pure GoCB buckets,
 // especially in the CBGT usage where we depend on cbdatasource features.
 func (bucket CouchbaseBucketGoCBGoCouchbaseHybrid) StartTapFeed(args sgbucket.TapArguments) (sgbucket.TapFeed, error) {
 	return bucket.GoCouchbaseBucket.StartTapFeed(args)
-}
-
-func (bucket CouchbaseBucketGoCBGoCouchbaseHybrid) Dump() {
-	bucket.GoCouchbaseBucket.Dump()
 }
 
 func (bucket CouchbaseBucketGoCBGoCouchbaseHybrid) UUID() (string, error) {
