@@ -1433,7 +1433,8 @@ func (bucket CouchbaseBucketGoCB) ViewCustom(ddoc, name string, params map[strin
 }
 
 func (bucket CouchbaseBucketGoCB) Refresh() error {
-	LogPanic("Unimplemented method: Refresh()")
+	// TODO: make sure it's safe to make this a no-op
+	// see https://github.com/couchbase/sync_gateway/issues/2423#issuecomment-294041699
 	return nil
 }
 
